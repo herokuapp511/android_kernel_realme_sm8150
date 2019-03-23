@@ -55,6 +55,9 @@
 #include <linux/nsproxy.h>
 #include <linux/file.h>
 #include <linux/psi.h>
+#include <linux/binfmts.h>
+#include <linux/cpu_input_boost.h>
+#include <linux/devfreq_boost.h>
 #include <net/sock.h>
 
 #define CREATE_TRACE_POINTS
@@ -2700,12 +2703,27 @@ struct task_struct *cgroup_procs_write_start(char *buf, bool threadgroup)
 	}
 
 	get_task_struct(tsk);
-	goto out_unlock_rcu;
+	rcu_read_unlock();
 
-out_unlock_threadgroup:
-	percpu_up_write(&cgroup_threadgroup_rwsem);
+	ret = cgroup_procs_write_permission(tsk, cgrp, of);
+	if (!ret)
+		ret = cgroup_attach_task(cgrp, tsk, threadgroup);
+
+	/* This covers boosting for app launches and app transitions */
+	if (!ret && !threadgroup &&
+	    !strcmp(of->kn->parent->name, "top-app") &&
+	    is_zygote_pid(tsk->parent->pid)) {
+		cpu_input_boost_kick_max(500);
+		devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 500);
+	}
+
+	put_task_struct(tsk);
+	goto out_unlock_threadgroup;
+
 out_unlock_rcu:
 	rcu_read_unlock();
+out_unlock_threadgroup:
+	percpu_up_write(&cgroup_threadgroup_rwsem);
 	return tsk;
 }
 
