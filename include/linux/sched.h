@@ -968,9 +968,15 @@ struct task_struct {
 	struct sched_dl_entity		dl;
 
 #ifdef CONFIG_UCLAMP_TASK
-	/* Clamp values requested for a scheduling entity */
+	/*
+	 * Clamp values requested for a scheduling entity.
+	 * Must be updated with task_rq_lock() held.
+	 */
 	struct uclamp_se		uclamp_req[UCLAMP_CNT];
-	/* Effective clamp values used for a scheduling entity */
+	/*
+	 * Effective clamp values used for a scheduling entity.
+	 * Must be updated with task_rq_lock() held.
+	 */
 	struct uclamp_se		uclamp[UCLAMP_CNT];
 #endif
 
@@ -1953,6 +1959,301 @@ extern void kick_process(struct task_struct *tsk);
 #else
 static inline void kick_process(struct task_struct *tsk) { }
 #endif
+extern int sched_fork(unsigned long clone_flags, struct task_struct *p);
+extern void sched_post_fork(struct task_struct *p);
+extern void sched_dead(struct task_struct *p);
+#ifdef CONFIG_SCHED_WALT
+extern void sched_exit(struct task_struct *p);
+#else
+static inline void sched_exit(struct task_struct *p) { }
+#endif
+
+
+extern void proc_caches_init(void);
+extern void flush_signals(struct task_struct *);
+extern void ignore_signals(struct task_struct *);
+extern void flush_signal_handlers(struct task_struct *, int force_default);
+extern int dequeue_signal(struct task_struct *tsk, sigset_t *mask, siginfo_t *info);
+
+static inline int kernel_dequeue_signal(siginfo_t *info)
+{
+	struct task_struct *tsk = current;
+	siginfo_t __info;
+	int ret;
+
+	spin_lock_irq(&tsk->sighand->siglock);
+	ret = dequeue_signal(tsk, &tsk->blocked, info ?: &__info);
+	spin_unlock_irq(&tsk->sighand->siglock);
+
+	return ret;
+}
+
+static inline void kernel_signal_stop(void)
+{
+	spin_lock_irq(&current->sighand->siglock);
+	if (current->jobctl & JOBCTL_STOP_DEQUEUED)
+		__set_current_state(TASK_STOPPED);
+	spin_unlock_irq(&current->sighand->siglock);
+
+	schedule();
+}
+
+extern void release_task(struct task_struct * p);
+extern int send_sig_info(int, struct siginfo *, struct task_struct *);
+extern int force_sigsegv(int, struct task_struct *);
+extern int force_sig_info(int, struct siginfo *, struct task_struct *);
+extern int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp);
+extern int kill_pid_info(int sig, struct siginfo *info, struct pid *pid);
+extern int kill_pid_info_as_cred(int, struct siginfo *, struct pid *,
+				const struct cred *, u32);
+extern int kill_pgrp(struct pid *pid, int sig, int priv);
+extern int kill_pid(struct pid *pid, int sig, int priv);
+extern int kill_proc_info(int, struct siginfo *, pid_t);
+extern __must_check bool do_notify_parent(struct task_struct *, int);
+extern void __wake_up_parent(struct task_struct *p, struct task_struct *parent);
+extern void force_sig(int, struct task_struct *);
+extern int send_sig(int, struct task_struct *, int);
+extern int zap_other_threads(struct task_struct *p);
+extern struct sigqueue *sigqueue_alloc(void);
+extern void sigqueue_free(struct sigqueue *);
+extern int send_sigqueue(struct sigqueue *,  struct task_struct *, int group);
+extern int do_sigaction(int, struct k_sigaction *, struct k_sigaction *);
+
+#ifdef TIF_RESTORE_SIGMASK
+/*
+ * Legacy restore_sigmask accessors.  These are inefficient on
+ * SMP architectures because they require atomic operations.
+ */
+
+/**
+ * set_restore_sigmask() - make sure saved_sigmask processing gets done
+ *
+ * This sets TIF_RESTORE_SIGMASK and ensures that the arch signal code
+ * will run before returning to user mode, to process the flag.  For
+ * all callers, TIF_SIGPENDING is already set or it's no harm to set
+ * it.  TIF_RESTORE_SIGMASK need not be in the set of bits that the
+ * arch code will notice on return to user mode, in case those bits
+ * are scarce.  We set TIF_SIGPENDING here to ensure that the arch
+ * signal code always gets run when TIF_RESTORE_SIGMASK is set.
+ */
+static inline void set_restore_sigmask(void)
+{
+	set_thread_flag(TIF_RESTORE_SIGMASK);
+	WARN_ON(!test_thread_flag(TIF_SIGPENDING));
+}
+static inline void clear_restore_sigmask(void)
+{
+	clear_thread_flag(TIF_RESTORE_SIGMASK);
+}
+static inline bool test_restore_sigmask(void)
+{
+	return test_thread_flag(TIF_RESTORE_SIGMASK);
+}
+static inline bool test_and_clear_restore_sigmask(void)
+{
+	return test_and_clear_thread_flag(TIF_RESTORE_SIGMASK);
+}
+
+#else	/* TIF_RESTORE_SIGMASK */
+
+/* Higher-quality implementation, used if TIF_RESTORE_SIGMASK doesn't exist. */
+static inline void set_restore_sigmask(void)
+{
+	current->restore_sigmask = true;
+	WARN_ON(!test_thread_flag(TIF_SIGPENDING));
+}
+static inline void clear_restore_sigmask(void)
+{
+	current->restore_sigmask = false;
+}
+static inline bool test_restore_sigmask(void)
+{
+	return current->restore_sigmask;
+}
+static inline bool test_and_clear_restore_sigmask(void)
+{
+	if (!current->restore_sigmask)
+		return false;
+	current->restore_sigmask = false;
+	return true;
+}
+#endif
+
+static inline void restore_saved_sigmask(void)
+{
+	if (test_and_clear_restore_sigmask())
+		__set_current_blocked(&current->saved_sigmask);
+}
+
+static inline sigset_t *sigmask_to_save(void)
+{
+	sigset_t *res = &current->blocked;
+	if (unlikely(test_restore_sigmask()))
+		res = &current->saved_sigmask;
+	return res;
+}
+
+static inline int kill_cad_pid(int sig, int priv)
+{
+	return kill_pid(cad_pid, sig, priv);
+}
+
+/* These can be the second arg to send_sig_info/send_group_sig_info.  */
+#define SEND_SIG_NOINFO ((struct siginfo *) 0)
+#define SEND_SIG_PRIV	((struct siginfo *) 1)
+#define SEND_SIG_FORCED	((struct siginfo *) 2)
+
+/*
+ * True if we are on the alternate signal stack.
+ */
+static inline int on_sig_stack(unsigned long sp)
+{
+	/*
+	 * If the signal stack is SS_AUTODISARM then, by construction, we
+	 * can't be on the signal stack unless user code deliberately set
+	 * SS_AUTODISARM when we were already on it.
+	 *
+	 * This improves reliability: if user state gets corrupted such that
+	 * the stack pointer points very close to the end of the signal stack,
+	 * then this check will enable the signal to be handled anyway.
+	 */
+	if (current->sas_ss_flags & SS_AUTODISARM)
+		return 0;
+
+#ifdef CONFIG_STACK_GROWSUP
+	return sp >= current->sas_ss_sp &&
+		sp - current->sas_ss_sp < current->sas_ss_size;
+#else
+	return sp > current->sas_ss_sp &&
+		sp - current->sas_ss_sp <= current->sas_ss_size;
+#endif
+}
+
+static inline int sas_ss_flags(unsigned long sp)
+{
+	if (!current->sas_ss_size)
+		return SS_DISABLE;
+
+	return on_sig_stack(sp) ? SS_ONSTACK : 0;
+}
+
+static inline void sas_ss_reset(struct task_struct *p)
+{
+	p->sas_ss_sp = 0;
+	p->sas_ss_size = 0;
+	p->sas_ss_flags = SS_DISABLE;
+}
+
+static inline unsigned long sigsp(unsigned long sp, struct ksignal *ksig)
+{
+	if (unlikely((ksig->ka.sa.sa_flags & SA_ONSTACK)) && ! sas_ss_flags(sp))
+#ifdef CONFIG_STACK_GROWSUP
+		return current->sas_ss_sp;
+#else
+		return current->sas_ss_sp + current->sas_ss_size;
+#endif
+	return sp;
+}
+
+/*
+ * Routines for handling mm_structs
+ */
+extern struct mm_struct * mm_alloc(void);
+
+/* mmdrop drops the mm and the page tables */
+extern void __mmdrop(struct mm_struct *);
+static inline void mmdrop(struct mm_struct *mm)
+{
+	if (unlikely(atomic_dec_and_test(&mm->mm_count)))
+		__mmdrop(mm);
+}
+
+static inline void mmdrop_async_fn(struct work_struct *work)
+{
+	struct mm_struct *mm = container_of(work, struct mm_struct, async_put_work);
+	__mmdrop(mm);
+}
+
+static inline void mmdrop_async(struct mm_struct *mm)
+{
+	if (unlikely(atomic_dec_and_test(&mm->mm_count))) {
+		INIT_WORK(&mm->async_put_work, mmdrop_async_fn);
+		schedule_work(&mm->async_put_work);
+	}
+}
+
+static inline bool mmget_not_zero(struct mm_struct *mm)
+{
+	return atomic_inc_not_zero(&mm->mm_users);
+}
+
+/* mmput gets rid of the mappings and all user-space */
+extern int mmput(struct mm_struct *mm);
+#ifdef CONFIG_MMU
+/* same as above but performs the slow path from the async context. Can
+ * be called from the atomic context as well
+ */
+extern void mmput_async(struct mm_struct *);
+#endif
+
+/* Grab a reference to a task's mm, if it is not already going away */
+extern struct mm_struct *get_task_mm(struct task_struct *task);
+/*
+ * Grab a reference to a task's mm, if it is not already going away
+ * and ptrace_may_access with the mode parameter passed to it
+ * succeeds.
+ */
+extern struct mm_struct *mm_access(struct task_struct *task, unsigned int mode);
+/* Remove the current tasks stale references to the old mm_struct on exit() */
+extern void exit_mm_release(struct task_struct *, struct mm_struct *);
+/* Remove the current tasks stale references to the old mm_struct on exec() */
+extern void exec_mm_release(struct task_struct *, struct mm_struct *);
+
+#ifdef CONFIG_HAVE_COPY_THREAD_TLS
+extern int copy_thread_tls(unsigned long, unsigned long, unsigned long,
+			struct task_struct *, unsigned long);
+#else
+extern int copy_thread(unsigned long, unsigned long, unsigned long,
+			struct task_struct *);
+
+/* Architectures that haven't opted into copy_thread_tls get the tls argument
+ * via pt_regs, so ignore the tls argument passed via C. */
+static inline int copy_thread_tls(
+		unsigned long clone_flags, unsigned long sp, unsigned long arg,
+		struct task_struct *p, unsigned long tls)
+{
+	return copy_thread(clone_flags, sp, arg, p);
+}
+#endif
+extern void flush_thread(void);
+
+#ifdef CONFIG_HAVE_EXIT_THREAD
+extern void exit_thread(struct task_struct *tsk);
+#else
+static inline void exit_thread(struct task_struct *tsk)
+{
+}
+#endif
+
+extern void exit_files(struct task_struct *);
+extern void __cleanup_sighand(struct sighand_struct *);
+
+extern void exit_itimers(struct signal_struct *);
+extern void flush_itimer_signals(void);
+
+extern void do_group_exit(int);
+
+extern int do_execve(struct filename *,
+		     const char __user * const __user *,
+		     const char __user * const __user *);
+extern int do_execveat(int, struct filename *,
+		       const char __user * const __user *,
+		       const char __user * const __user *,
+		       int);
+extern long _do_fork(unsigned long, unsigned long, unsigned long, int __user *, int __user *, unsigned long);
+extern long do_fork(unsigned long, unsigned long, unsigned long, int __user *, int __user *);
+struct task_struct *fork_idle(int);
+extern pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
 
 extern void __set_task_comm(struct task_struct *tsk, const char *from, bool exec);
 
