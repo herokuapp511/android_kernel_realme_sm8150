@@ -8202,6 +8202,11 @@ static int find_energy_efficient_cpu(struct sched_domain *sd,
 	if (trace_sched_task_util_enabled())
 		start_t = sched_clock();
 
+#ifdef  CONFIG_UCLAMP_TASK
+	boosted = uclamp_boosted(p);
+	prefer_idle = uclamp_latency_sensitive(p);
+#endif
+
 	if (need_idle)
 		sync = 0;
 
