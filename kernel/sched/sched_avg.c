@@ -192,5 +192,7 @@ unsigned int sched_get_cpu_util(int cpu)
 
 u64 sched_get_cpu_last_busy_time(int cpu)
 {
-	return atomic64_read(&per_cpu(last_busy_time, cpu));
+	u64 bias_end_time = atomic64_read(&per_cpu(last_busy_time, cpu));
+	
+	return 0;
 }
