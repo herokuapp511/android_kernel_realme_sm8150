@@ -4,6 +4,8 @@
 #
 
 ccflags-y += -Ofast
+ccflags-y += -mllvm -inline-threshold=15000
+ccflags-y += -mllvm -inlinehint-threshold=10000
 
 obj-$(CONFIG_BLOCK) := bio.o elevator.o blk-core.o blk-tag.o blk-sysfs.o \
 			blk-flush.o blk-settings.o blk-ioc.o blk-map.o \
