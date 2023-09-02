@@ -762,6 +762,8 @@ struct touchpanel_data {
     uint32_t irq_flags_cover;                           /*cover irq setting flag*/
 
     int gesture_enable;                                 /*control state of black gesture*/
+    int double_tap_pressed;
+	int single_tap_pressed;
 #if GESTURE_RATE_MODE
     int geature_ignore;
 #endif
@@ -1009,6 +1011,8 @@ struct touchpanel_data *common_touch_data_alloc(void);
 
 int  common_touch_data_free(struct touchpanel_data *pdata);
 int  register_common_touch_device(struct touchpanel_data *pdata);
+
+void init_touchpanel_proc_sysfs(struct touchpanel_data *ts);
 
 void tp_i2c_suspend(struct touchpanel_data *ts);
 void tp_i2c_resume (struct touchpanel_data *ts);
