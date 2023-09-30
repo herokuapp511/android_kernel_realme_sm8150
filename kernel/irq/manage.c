@@ -418,10 +418,9 @@ int irq_setup_affinity(struct irq_desc *desc)
 			irqd_clear(&desc->irq_data, IRQD_AFFINITY_SET);
 	}
 
-	cpumask_and(mask, cpu_online_mask, set);
-
+	cpumask_and(&mask, cpu_online_mask, set);
 	if (irqd_has_set(&desc->irq_data, IRQF_PERF_CRITICAL))
-		cpumask_copy(mask, cpu_perf_mask);
+		cpumask_copy(&mask, cpu_online_mask);
 
 	if (node != NUMA_NO_NODE) {
 		const struct cpumask *nodemask = cpumask_of_node(node);
@@ -1304,6 +1303,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	struct irqaction *old, **old_ptr;
 	unsigned long flags, thread_mask = 0;
 	int ret, nested, shared = 0;
+	cpumask_var_t mask;
 
 	if (!desc)
 		return -EINVAL;
@@ -1362,6 +1362,11 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 		}
 	}
 
+	if (!alloc_cpumask_var(&mask, GFP_KERNEL)) {
+		ret = -ENOMEM;
+		goto out_thread;
+	}
+	
 	/*
 	 * Drivers are often written to work w/o knowledge about the
 	 * underlying irq chip implementation, so a request for a
